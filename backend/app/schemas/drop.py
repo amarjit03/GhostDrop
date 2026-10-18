@@ -33,3 +33,9 @@ class CreateDropResponse(BaseModel):
     id: str
     owner_token: str
     limits: DropLimits
+
+
+class FinalizeDropRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record_count: int = Field(ge=1, le=1_048_577)

@@ -24,12 +24,18 @@ from app.core.drop_limits import (
 from app.db.dependencies import get_db
 from app.db.models.drop import Drop
 from app.db.models.record import Record
-from app.schemas.drop import CreateDropRequest, CreateDropResponse, DropLimits
+from app.schemas.drop import (
+    CreateDropRequest,
+    CreateDropResponse,
+    DropLimits,
+    FinalizeDropRequest,
+)
 from app.storage.minio import (
     delete_record,
     download_record,
     upload_record,
 )
+from datetime import datetime, timedelta, timezone
 
 router = APIRouter(prefix="/v1/drops", tags=["Drops"])
 
@@ -431,3 +437,134 @@ async def upload_text_record(
 
     response.headers["Cache-Control"] = "no-store"
     return {"status": "ok"}
+
+
+@router.post("/{drop_id}/finalize")
+async def finalize_drop(
+    drop_id: str,
+    payload: FinalizeDropRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    # Reject malformed IDs before querying the database.
+    if not drop_id or len(drop_id) > 128:
+        raise _not_found()
+
+    # Require the owner token in the Authorization header, never the URL.
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise _not_found()
+
+    # Prevent intermediaries and browsers from caching sensitive responses.
+    response.headers["Cache-Control"] = "no-store"
+
+    # Lock the drop row so record uploads and finalization cannot race.
+    result = await db.execute(
+        select(Drop)
+        .where(Drop.id == drop_id)
+        .with_for_update()
+    )
+    drop = result.scalar_one_or_none()
+
+    # Missing drops and invalid tokens deliberately produce the same response.
+    _validate_owner_token(drop, token)
+
+    # Allow a retry after a successful finalize, but never change its record count.
+    if drop.state == "active":
+        if drop.record_count != payload.record_count:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "finalize_conflict"},
+            )
+        return {"id": drop.id, "expires_at": drop.expires_at}
+
+    # Only pending drops can be finalized for the first time.
+    if drop.state != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "drop_not_pending"},
+        )
+
+    # File drops are not supported by this protocol version yet.
+    if drop.kind != "text":
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "unsupported_drop_kind"},
+        )
+
+    # Records must not be accepted as a complete drop without an envelope.
+    if drop.envelope is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "envelope_missing"},
+        )
+
+    # A text drop consists of metadata record 0 and text record 1.
+    if payload.record_count != 2:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_record_count"},
+        )
+
+    # Load all database records in order; do not trust the submitted count alone.
+    records_result = await db.execute(
+        select(Record)
+        .where(Record.drop_id == drop_id)
+        .order_by(Record.idx)
+    )
+    records = list(records_result.scalars().all())
+
+    # Missing or non-contiguous records mean the upload is not complete.
+    if len(records) != 2 or [record.idx for record in records] != [0, 1]:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "records_incomplete"},
+        )
+
+    metadata, text_record = records
+
+    # Verify metadata record structure against the text protocol.
+    if (
+        metadata.record_type != 0
+        or metadata.is_final
+        or metadata.plaintext_len > MAX_METADATA_PLAINTEXT
+        or metadata.frame_bytes
+        != RECORD_HEADER_BYTES + metadata.plaintext_len + GCM_TAG_BYTES
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_metadata_record"},
+        )
+
+    # Verify the text record is the final record and has a valid frame size.
+    if (
+        text_record.record_type != 1
+        or not text_record.is_final
+        or text_record.plaintext_len > MAX_TEXT_BYTES
+        or text_record.frame_bytes
+        != RECORD_HEADER_BYTES + text_record.plaintext_len + GCM_TAG_BYTES
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_text_record"},
+        )
+
+    # Calculate expiration only when the drop becomes active.
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=drop.ttl_seconds)
+
+    # Update all finalization fields in the same database transaction.
+    drop.state = "active"
+    drop.finalized_at = now
+    drop.expires_at = expires_at
+    drop.record_count = len(records)
+    drop.ciphertext_bytes = sum(record.frame_bytes for record in records)
+
+    await db.commit()
+
+    return {
+        "id": drop.id,
+        "expires_at": expires_at,
+    }

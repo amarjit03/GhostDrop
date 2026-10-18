@@ -2,8 +2,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.drops import router as drops_router
+from app.core.settings import Settings
 
-app = FastAPI()
+app = FastAPI(
+)
 
 origins = [
     "http://localhost:3000",
@@ -20,6 +22,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Register the drop creation, envelope, and record endpoints.
 app.include_router(drops_router)
 
 

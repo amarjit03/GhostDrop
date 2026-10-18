@@ -1,4 +1,3 @@
-# backend/app/core/settings.py
 
 from functools import lru_cache
 
@@ -9,6 +8,7 @@ from sqlalchemy.engine import make_url
 
 class Settings(BaseSettings):
     debug: bool = False
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     )
 
     database_url: SecretStr
+
+    # MinIO / S3-compatible object storage settings.
+    minio_endpoint: str = "http://127.0.0.1:9000"
+    minio_access_key: SecretStr
+    minio_secret_key: SecretStr
+    minio_bucket: str = "ghostdrop-records"
 
     @field_validator("database_url")
     @classmethod

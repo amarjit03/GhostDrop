@@ -1,14 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.config import settings
+from app.api.v1.drops import router as drops_router
+from app.core.settings import Settings
 
 app = FastAPI(
-    title=settings.APP_NAME,
-    version=settings.APP_VERSION,
 )
 
-# Allow requests from your local frontend.
 origins = [
     "http://localhost:3000",
     "http://localhost:5173",
@@ -23,6 +21,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(drops_router)
 
 
 @app.get("/health", tags=["Health"])

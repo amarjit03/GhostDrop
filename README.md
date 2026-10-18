@@ -279,6 +279,6 @@ Released under the [MIT License](./LICENSE).
 
 <div align="center">
 
-Built by [YOUR NAME](https://github.com/YOUR_USERNAME)
+Built by [YOUR NAME](https://github.com/amarjit03)
 
 </div>

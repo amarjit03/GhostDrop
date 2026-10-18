@@ -9,7 +9,7 @@ from sqlalchemy.engine import make_url
 
 class Settings(BaseSettings):
     """Validated runtime settings loaded from environment variables."""
-    
+
     debug: bool = False
 
     model_config = SettingsConfigDict(
@@ -28,9 +28,7 @@ class Settings(BaseSettings):
         url = make_url(value.get_secret_value())
 
         if url.drivername != "postgresql+asyncpg":
-            raise ValueError(
-                "DATABASE_URL must use the postgresql+asyncpg driver"
-            )
+            raise ValueError("DATABASE_URL must use the postgresql+asyncpg driver")
 
         if not url.database:
             raise ValueError("DATABASE_URL must specify a database name")

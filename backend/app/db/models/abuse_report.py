@@ -1,12 +1,12 @@
 # app/db/models/abuse_report.py
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     CheckConstraint,
     ForeignKey,
     Identity,
     String,
-    TIMESTAMP,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column

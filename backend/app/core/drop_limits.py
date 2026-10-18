@@ -1,4 +1,3 @@
-
 # app/core/drop_limits.py
 
 # Maximum plaintext bytes represented by one encrypted data record.
@@ -26,4 +25,6 @@ OWNER_TOKEN_BYTES = 32
 DROP_ID_COLLISION_ATTEMPTS = 3
 
 # Upper bound for the advisory client size hint.
-MAX_SIZE_HINT = MAX_METADATA_PLAINTEXT + MAX_TEXT_BYTES + RECORD_HEADER_BYTES + GCM_TAG_BYTES
+MAX_SIZE_HINT = (
+    MAX_METADATA_PLAINTEXT + MAX_TEXT_BYTES + RECORD_HEADER_BYTES + GCM_TAG_BYTES
+)

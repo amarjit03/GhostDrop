@@ -1,4 +1,3 @@
-
 # app/schemas/drop.py
 
 from typing import Literal
@@ -11,7 +10,6 @@ from app.core.drop_limits import (
     MAX_SIZE_HINT,
     MAX_TEXT_BYTES,
 )
-
 
 
 class CreateDropRequest(BaseModel):

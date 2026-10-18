@@ -1,4 +1,3 @@
-
 from functools import lru_cache
 
 from pydantic import SecretStr, field_validator
@@ -29,9 +28,7 @@ class Settings(BaseSettings):
         url = make_url(value.get_secret_value())
 
         if url.drivername != "postgresql+asyncpg":
-            raise ValueError(
-                "DATABASE_URL must use the postgresql+asyncpg driver"
-            )
+            raise ValueError("DATABASE_URL must use the postgresql+asyncpg driver")
 
         if not url.database:
             raise ValueError("DATABASE_URL must specify a database name")

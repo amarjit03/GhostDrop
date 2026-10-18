@@ -1,16 +1,15 @@
 # app/db/models/drop.py
 
 from sqlalchemy import (
+    TIMESTAMP,
     BigInteger,
     Boolean,
     CheckConstraint,
+    Index,
     Integer,
     LargeBinary,
     String,
-    Text,
-    TIMESTAMP,
     text,
-    Index,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,12 +18,9 @@ from app.db.base import Base
 
 class Drop(Base):
     __tablename__ = "drops"
-    
-    
+
     __table_args__ = (
-        
         Index("ix_drops_state_expires_at", "state", "expires_at"),
-        
         CheckConstraint(
             "id ~ '^[A-Za-z0-9_-]{1,128}$'",
             name="ck_drops_id_format",

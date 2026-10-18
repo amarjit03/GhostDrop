@@ -1,7 +1,7 @@
-
 # app/api/v1/drops.py
 
 
+import asyncio
 import hashlib
 import hmac
 import secrets
@@ -15,12 +15,21 @@ from app.core.drop_limits import (
     CHUNK_SIZE,
     DROP_ID_BYTES,
     DROP_ID_COLLISION_ATTEMPTS,
+    GCM_TAG_BYTES,
+    MAX_METADATA_PLAINTEXT,
+    MAX_TEXT_BYTES,
     OWNER_TOKEN_BYTES,
+    RECORD_HEADER_BYTES,
 )
 from app.db.dependencies import get_db
 from app.db.models.drop import Drop
+from app.db.models.record import Record
 from app.schemas.drop import CreateDropRequest, CreateDropResponse, DropLimits
-
+from app.storage.minio import (
+    delete_record,
+    download_record,
+    upload_record,
+)
 
 router = APIRouter(prefix="/v1/drops", tags=["Drops"])
 
@@ -71,6 +80,75 @@ def _validate_envelope(data: bytes) -> bool:
         raise HTTPException(status_code=422, detail={"code": "invalid_chunk_size"})
 
     return password_mode
+
+
+def _validate_record_frame(data: bytes, path_index: int) -> tuple[int, bool, int]:
+    """Validate a text record's public frame structure."""
+    if path_index not in (0, 1):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_record_index"},
+        )
+
+    if len(data) < RECORD_HEADER_BYTES + GCM_TAG_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "record_too_short"},
+        )
+
+    # The first four bytes bind the frame to its requested record index.
+    frame_index = int.from_bytes(data[0:4], "big")
+    record_type = data[4]
+    flags = data[5]
+    plaintext_len = int.from_bytes(data[6:10], "big")
+
+    if frame_index != path_index:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "record_index_mismatch"},
+        )
+
+    # Only bit zero is defined in the record flags.
+    if flags & ~0x01:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_record_flags"},
+        )
+
+    is_final = bool(flags & 0x01)
+
+    # The browser encrypts the plaintext; the API checks lengths, not GCM tags.
+    expected_frame_bytes = RECORD_HEADER_BYTES + plaintext_len + GCM_TAG_BYTES
+    if len(data) != expected_frame_bytes:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "record_length_mismatch"},
+        )
+
+    if path_index == 0:
+        if record_type != 0 or is_final:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_metadata_record"},
+            )
+        if plaintext_len > MAX_METADATA_PLAINTEXT:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "metadata_too_large"},
+            )
+    else:
+        if record_type != 1 or not is_final:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_text_record"},
+            )
+        if plaintext_len > MAX_TEXT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "text_too_large"},
+            )
+
+    return record_type, is_final, plaintext_len
 
 
 @router.post(
@@ -131,6 +209,7 @@ async def create_drop(
         detail={"code": "drop_id_generation_failed"},
     )
 
+
 @router.put("/{drop_id}/envelope")
 async def upload_envelope(
     drop_id: str,
@@ -150,11 +229,7 @@ async def upload_envelope(
         raise _not_found()
 
     # Lock the row so envelope upload cannot race with finalization.
-    result = await db.execute(
-        select(Drop)
-        .where(Drop.id == drop_id)
-        .with_for_update()
-    )
+    result = await db.execute(select(Drop).where(Drop.id == drop_id).with_for_update())
     drop = result.scalar_one_or_none()
 
     _validate_owner_token(drop, token)
@@ -186,6 +261,173 @@ async def upload_envelope(
     drop.password_mode = password_mode
 
     await db.commit()
+
+    response.headers["Cache-Control"] = "no-store"
+    return {"status": "ok"}
+
+
+@router.put("/{drop_id}/records/{index}")
+async def upload_text_record(
+    drop_id: str,
+    index: int,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, str]:
+    if not drop_id or len(drop_id) > 128 or index not in (0, 1):
+        raise (
+            _not_found()
+            if index not in (0, 1)
+            else HTTPException(
+                status_code=422,
+                detail={"code": "invalid_drop_id"},
+            )
+        )
+
+    # Require the owner secret in the header, never in a URL.
+    authorization = request.headers.get("authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise _not_found()
+
+    # Authenticate and check state before consuming the request body.
+    result = await db.execute(select(Drop).where(Drop.id == drop_id))
+    drop = result.scalar_one_or_none()
+    _validate_owner_token(drop, token)
+
+    if drop.state != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "drop_not_pending"},
+        )
+
+    # Bound the stream even if Content-Length is missing or dishonest.
+    max_plaintext = MAX_METADATA_PLAINTEXT if index == 0 else MAX_TEXT_BYTES
+    max_frame_bytes = RECORD_HEADER_BYTES + max_plaintext + GCM_TAG_BYTES
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > max_frame_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail={"code": "record_too_large"},
+                )
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_content_length"},
+            )
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > max_frame_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "record_too_large"},
+            )
+        body.extend(chunk)
+
+    frame = bytes(body)
+    record_type, is_final, plaintext_len = _validate_record_frame(frame, index)
+
+    # Lock and recheck after receiving the body to serialize against finalize.
+    result = await db.execute(select(Drop).where(Drop.id == drop_id).with_for_update())
+    drop = result.scalar_one_or_none()
+    _validate_owner_token(drop, token)
+
+    if drop.state != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "drop_not_pending"},
+        )
+
+    if drop.kind != "text":
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "unsupported_drop_kind"},
+        )
+
+    object_key = f"drops/{drop_id}/{index:07d}"
+
+    existing_result = await db.execute(
+        select(Record).where(
+            Record.drop_id == drop_id,
+            Record.idx == index,
+        )
+    )
+    existing = existing_result.scalar_one_or_none()
+
+    if existing is not None:
+        # Compare exact ciphertext; a retry must not replace an earlier frame.
+        stored = await asyncio.to_thread(
+            download_record, object_key=existing.object_key
+        )
+        if hmac.compare_digest(stored, frame):
+            response.headers["Cache-Control"] = "no-store"
+            return {"status": "ok"}
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "record_conflict"},
+        )
+
+    created_object = False
+
+    try:
+        # boto3 is synchronous, so keep network I/O off the event loop.
+        await asyncio.to_thread(
+            upload_record,
+            object_key=object_key,
+            body=frame,
+        )
+        created_object = True
+
+        db.add(
+            Record(
+                drop_id=drop_id,
+                idx=index,
+                record_type=record_type,
+                is_final=is_final,
+                plaintext_len=plaintext_len,
+                frame_bytes=len(frame),
+                object_key=object_key,
+            )
+        )
+        await db.commit()
+
+    except FileExistsError:
+        # An object without its DB row can remain after a prior interrupted
+        # attempt. Accept it only if its bytes match this exact retry.
+        stored = await asyncio.to_thread(download_record, object_key=object_key)
+        if not hmac.compare_digest(stored, frame):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "record_conflict"},
+            )
+
+        db.add(
+            Record(
+                drop_id=drop_id,
+                idx=index,
+                record_type=record_type,
+                is_final=is_final,
+                plaintext_len=plaintext_len,
+                frame_bytes=len(frame),
+                object_key=object_key,
+            )
+        )
+        await db.commit()
+
+    except Exception:
+        await db.rollback()
+
+        # Remove only an object this request created, and only after DB failure.
+        if created_object:
+            try:
+                await asyncio.to_thread(delete_record, object_key=object_key)
+            except Exception:
+                # Leave cleanup to reconciliation if object deletion fails.
+                pass
+        raise
 
     response.headers["Cache-Control"] = "no-store"
     return {"status": "ok"}

@@ -1,4 +1,8 @@
 
+# app/main.py
+
+import logging
+from contextlib import asynccontextmanager
 from urllib.parse import unquote
 
 from fastapi import FastAPI, Request
@@ -6,8 +10,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 
 from app.api.v1.drops import router as drops_router
+from app.workers.scheduler import start_cleanup_scheduler
 
-app = FastAPI()
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    scheduler = start_cleanup_scheduler()
+
+    try:
+        yield
+    finally:
+        if scheduler is not None:
+            scheduler.shutdown(wait=False)
+            logger.info("Cleanup scheduler stopped")
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -37,6 +57,7 @@ async def normalize_metadata_not_found(
         )
 
     return response
+
 
 origins = [
     "http://localhost:3000",

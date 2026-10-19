@@ -46,6 +46,10 @@ from app.storage.presigner import presign_record_get_url
 
 logger = logging.getLogger(__name__)
 
+_DUMMY_OWNER_TOKEN_HASH = hashlib.sha256(
+    b"ghostdrop-invalid-owner-token"
+).digest()
+
 router = APIRouter(prefix="/v1/drops", tags=["Drops"])
 
 
@@ -59,17 +63,18 @@ def _not_found() -> HTTPException:
 
 
 def _validate_owner_token(drop: Drop | None, token: str | None) -> None:
-    # Reject missing credentials without revealing whether the drop exists.
-    if drop is None or not token:
+    """Authenticate an owner without distinguishing missing drops from bad tokens."""
+    candidate_hash = hashlib.sha256(
+        (token if token else "invalid-owner-token").encode("utf-8")
+    ).digest()
+
+    expected_hash = (
+        drop.owner_token_hash if drop is not None else _DUMMY_OWNER_TOKEN_HASH
+    )
+    matches = hmac.compare_digest(candidate_hash, expected_hash)
+
+    if drop is None or not token or not matches:
         raise _not_found()
-
-    # Hash the supplied token so only its digest is compared with the stored digest.
-    supplied_hash = hashlib.sha256(token.encode("utf-8")).digest()
-
-    # Constant-time comparison reduces timing leaks during authentication.
-    if not hmac.compare_digest(supplied_hash, drop.owner_token_hash):
-        raise _not_found()
-
 
 def _validate_envelope(data: bytes) -> bool:
     # The envelope has a fixed layout, except for the optional password salt.
@@ -737,3 +742,47 @@ async def consume_drop(
             detail={"code": "internal_error"},
             headers={"Cache-Control": "no-store"},
         ) from None
+
+# app/api/v1/drops.py
+
+@router.delete("/{drop_id}", status_code=204)
+async def delete_drop(
+    drop_id: str,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Revoke a drop without performing object-storage operations."""
+    response.headers["Cache-Control"] = "no-store"
+
+    # Reject malformed IDs before querying PostgreSQL.
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", drop_id):
+        _validate_owner_token(None, None)
+
+    authorization = request.headers.get("authorization", "")
+    scheme, separator, token = authorization.partition(" ")
+
+    if scheme.lower() != "bearer" or not separator or not token.strip():
+        token = None
+    else:
+        token = token.strip()
+
+    # Lock the row so DELETE serializes with finalize and other row updates.
+    result = await db.execute(
+        select(Drop)
+        .where(Drop.id == drop_id)
+        .with_for_update()
+    )
+    drop = result.scalar_one_or_none()
+
+    _validate_owner_token(drop, token)
+
+    # Revoke only drops that have not been consumed or expired.
+    if drop.state in {"pending", "active"}:
+        drop.state = "deleted"
+        await db.commit()
+
+    return Response(
+        status_code=204,
+        headers={"Cache-Control": "no-store"},
+    )

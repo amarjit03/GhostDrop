@@ -1,11 +1,42 @@
-from fastapi import FastAPI
+
+from urllib.parse import unquote
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
 
 from app.api.v1.drops import router as drops_router
-from app.core.settings import Settings
 
-app = FastAPI(
-)
+app = FastAPI()
+
+
+@app.middleware("http")
+async def normalize_metadata_not_found(
+    request: Request,
+    call_next,
+):
+    raw_path = request.scope.get("raw_path", b"").decode(
+        "ascii", errors="ignore"
+    )
+    decoded_path = unquote(raw_path)
+
+    # Handle encoded slashes in drop metadata URLs.
+    is_metadata_path = (
+        "/v1/drops/" in decoded_path
+        and decoded_path.endswith("/meta")
+        and "%2f" in raw_path.lower()
+    )
+
+    response = await call_next(request)
+
+    if is_metadata_path and response.status_code == 404:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": {"code": "drop_not_found"}},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    return response
 
 origins = [
     "http://localhost:3000",

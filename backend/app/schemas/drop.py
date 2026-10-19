@@ -1,5 +1,6 @@
 # app/schemas/drop.py
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -39,3 +40,28 @@ class FinalizeDropRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     record_count: int = Field(ge=1, le=1_048_577)
+
+class DropMetadataResponse(BaseModel):
+    state: Literal["active"]
+    password_required: bool
+    envelope: str
+    record_count: int
+    ciphertext_bytes: int
+    expires_at: datetime
+    views_remaining: int
+    
+
+
+class ConsumeRecordResponse(BaseModel):
+    index: int
+    frame_bytes: int
+    url: str
+
+
+class DropConsumeResponse(BaseModel):
+    envelope: str
+    password_required: bool
+    record_count: int
+    expires_at: datetime
+    views_remaining: int
+    records: list[ConsumeRecordResponse]

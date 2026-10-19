@@ -1,13 +1,16 @@
 # app/api/v1/drops.py
 
-
 import asyncio
+import base64
 import hashlib
 import hmac
+import logging
+import re
 import secrets
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,13 +24,17 @@ from app.core.drop_limits import (
     OWNER_TOKEN_BYTES,
     RECORD_HEADER_BYTES,
 )
+from app.db.consume import get_records_for_consume, reserve_view
 from app.db.dependencies import get_db
 from app.db.models.drop import Drop
 from app.db.models.record import Record
 from app.schemas.drop import (
+    ConsumeRecordResponse,
     CreateDropRequest,
     CreateDropResponse,
+    DropConsumeResponse,
     DropLimits,
+    DropMetadataResponse,
     FinalizeDropRequest,
 )
 from app.storage.minio import (
@@ -35,14 +42,20 @@ from app.storage.minio import (
     download_record,
     upload_record,
 )
-from datetime import datetime, timedelta, timezone
+from app.storage.presigner import presign_record_get_url
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/drops", tags=["Drops"])
 
 
 def _not_found() -> HTTPException:
     # Use the same response for missing drops and invalid tokens.
-    return HTTPException(status_code=404, detail={"code": "drop_not_found"})
+    return HTTPException(
+        status_code=404,
+        detail={"code": "drop_not_found"},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _validate_owner_token(drop: Drop | None, token: str | None) -> None:
@@ -423,8 +436,21 @@ async def upload_text_record(
         )
         await db.commit()
 
-    except Exception:
+    except HTTPException:
         await db.rollback()
+        raise
+    
+    except Exception as exc:
+        
+        logger.error(
+        "Drop consume operation failed (%s)",
+        type(exc).__name__,
+        )
+        raise HTTPException(
+        status_code=500,
+        detail={"code": "internal_error"},
+        headers={"Cache-Control": "no-store"},
+    ) from None
 
         # Remove only an object this request created, and only after DB failure.
         if created_object:
@@ -552,7 +578,7 @@ async def finalize_drop(
         )
 
     # Calculate expiration only when the drop becomes active.
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expires_at = now + timedelta(seconds=drop.ttl_seconds)
 
     # Update all finalization fields in the same database transaction.
@@ -568,3 +594,146 @@ async def finalize_drop(
         "id": drop.id,
         "expires_at": expires_at,
     }
+
+
+@router.get("/{drop_id}/meta", response_model=DropMetadataResponse)
+async def get_drop_metadata(
+    drop_id: str,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    # Reject malformed IDs before touching the database.
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", drop_id):
+        raise _not_found()
+
+    # Do not allow browsers or intermediaries to cache metadata.
+    response.headers["Cache-Control"] = "no-store"
+
+    # Fetch only the fields needed for the public response.
+    result = await db.execute(
+        select(
+            Drop.password_mode,
+            Drop.envelope,
+            Drop.record_count,
+            Drop.ciphertext_bytes,
+            Drop.expires_at,
+            Drop.max_views,
+            Drop.view_count,
+        ).where(
+            Drop.id == drop_id,
+            Drop.state == "active",
+            Drop.expires_at > func.now(),
+        )
+    )
+
+    row = result.one_or_none()
+
+    # Unknown, inactive, and expired drops share the same 404 response.
+    if row is None:
+        raise _not_found()
+
+    # An active drop without its envelope violates the expected data invariant.
+    if row.envelope is None:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "internal_error"},
+        )
+
+    # URL-safe Base64 without trailing padding.
+    envelope = base64.urlsafe_b64encode(row.envelope).decode("ascii").rstrip("=")
+
+    expires_at = row.expires_at.astimezone(UTC)
+
+    return DropMetadataResponse(
+        state="active",
+        password_required=row.password_mode,
+        envelope=envelope,
+        record_count=row.record_count,
+        ciphertext_bytes=row.ciphertext_bytes,
+        expires_at=expires_at,
+        views_remaining=row.max_views - row.view_count,
+    )
+
+
+# app/api/v1/drops.py
+
+@router.post("/{drop_id}/consume", response_model=DropConsumeResponse)
+async def consume_drop(
+    drop_id: str,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    """Reserve one view and return signed URLs for the encrypted records."""
+
+    # Reject malformed IDs before querying PostgreSQL.
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", drop_id):
+        raise _not_found()
+
+    response.headers["Cache-Control"] = "no-store"
+
+    try:
+        # This single UPDATE reserves the view atomically.
+        row = await reserve_view(db, drop_id)
+
+        if row is None:
+            await db.rollback()
+            raise _not_found()
+
+        # An active drop without an envelope violates the data invariant.
+        if row["envelope"] is None:
+            raise RuntimeError("Active drop has no envelope")
+
+        # Fetch and validate record metadata before committing the view.
+        records = await get_records_for_consume(db, drop_id)
+        expected_indexes = list(range(row["record_count"]))
+        actual_indexes = [record["index"] for record in records]
+
+        if (
+            len(records) != row["record_count"]
+            or actual_indexes != expected_indexes
+        ):
+            raise RuntimeError("Drop record metadata is inconsistent")
+
+        # boto3 is synchronous; do not block the async event loop.
+        response_records = []
+
+        for record in records:
+            url = await asyncio.to_thread(
+                presign_record_get_url,
+                record["object_key"],
+            )
+            response_records.append(
+                ConsumeRecordResponse(
+                    index=record["index"],
+                    frame_bytes=record["frame_bytes"],
+                    url=url,
+                )
+            )
+
+        # Commit only after validation and signing have both succeeded.
+        await db.commit()
+
+        return DropConsumeResponse(
+            envelope=base64.urlsafe_b64encode(row["envelope"])
+            .decode("ascii")
+            .rstrip("="),
+            password_required=row["password_mode"],
+            record_count=row["record_count"],
+            expires_at=row["expires_at"].astimezone(UTC),
+            views_remaining=row["max_views"] - row["view_count"],
+            records=response_records,
+        )
+
+    except HTTPException:
+        # Preserve expected API errors, including the shared 404.
+        await db.rollback()
+        raise
+
+    except Exception:
+        await db.rollback()
+        logger.exception("Drop consume operation failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "internal_error"},
+            headers={"Cache-Control": "no-store"},
+        ) from None

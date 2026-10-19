@@ -71,9 +71,10 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("ciphertext_bytes >= 0", name="ck_drops_ciphertext_bytes"),
         sa.CheckConstraint(
-            "envelope IS NULL OR (password_mode = FALSE AND octet_length(envelope) = 49) OR (password_mode = TRUE AND octet_length(envelope) = 65)",
-            name="ck_drops_envelope_length",
-        ),
+            "envelope IS NULL OR "
+            "(password_mode = FALSE AND octet_length(envelope) = 49) OR "
+            "(password_mode = TRUE AND octet_length(envelope) = 65)",
+            name="ck_drops_envelope_length",),
         sa.CheckConstraint(
             "expires_at IS NULL OR expires_at >= created_at", name="ck_drops_expiration"
         ),

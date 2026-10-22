@@ -14,6 +14,7 @@
     "format:check": "prettier --check ."
   },
   "dependencies": {
+    "cbor": "^10.0.12",
     "next": "16.4.2",
     "react": "19.3.0",
     "react-dom": "19.3.0"

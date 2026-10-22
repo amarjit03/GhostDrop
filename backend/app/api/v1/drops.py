@@ -298,15 +298,19 @@ async def upload_text_record(
     response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, str]:
-    if not drop_id or len(drop_id) > 128 or index not in (0, 1):
-        raise (
-            _not_found()
-            if index not in (0, 1)
-            else HTTPException(
-                status_code=422,
-                detail={"code": "invalid_drop_id"},
-            )
+    
+    if not drop_id or len(drop_id) > 128:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_drop_id"},
         )
+
+    if index not in (0, 1):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_record_index"},
+        )
+
 
     # Require the owner secret in the header, never in a URL.
     authorization = request.headers.get("authorization", "")
@@ -323,6 +327,12 @@ async def upload_text_record(
         raise HTTPException(
             status_code=409,
             detail={"code": "drop_not_pending"},
+        )
+    
+    if drop.kind != "text":
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "unsupported_drop_kind"},
         )
 
     # Bound the stream even if Content-Length is missing or dishonest.
@@ -364,12 +374,13 @@ async def upload_text_record(
             status_code=409,
             detail={"code": "drop_not_pending"},
         )
-
+    
     if drop.kind != "text":
         raise HTTPException(
             status_code=422,
             detail={"code": "unsupported_drop_kind"},
         )
+
 
     object_key = f"drops/{drop_id}/{index:07d}"
 

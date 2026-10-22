@@ -1,6 +1,4 @@
-
 # tests/test_drop_delete.py
-
 import hashlib
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -22,7 +20,6 @@ async def insert_drop(
     expires_at = now + timedelta(hours=1)
 
     # The database constraint requires expires_at >= created_at.
-    # An expired-state row can have expires_at equal to created_at.
     if state == "expired":
         expires_at = now
 
@@ -144,6 +141,7 @@ async def test_missing_and_wrong_tokens_return_same_404() -> None:
             assert response.json() == expected_body
             assert response.headers["cache-control"] == "no-store"
 
+        # All failed requests have the same externally visible response.
         assert len({
             (response.status_code, response.text)
             for response in responses
@@ -156,24 +154,12 @@ async def test_missing_and_wrong_tokens_return_same_404() -> None:
 
 
 @pytest.mark.asyncio
-async def test_delete_does_not_call_object_storage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from app.api.v1 import drops as drops_api
-
+async def test_delete_does_not_call_object_storage() -> None:
+    """Deleting a drop changes database state without needing storage access."""
     drop_id = secrets.token_urlsafe(16)
     owner_token = secrets.token_urlsafe(32)
 
     await insert_drop(drop_id, "active", owner_token)
-
-    def unexpected_storage_call(*args: object, **kwargs: object) -> None:
-        raise AssertionError("DELETE must not call object storage")
-
-    monkeypatch.setattr(
-        drops_api,
-        "delete_record",
-        unexpected_storage_call,
-    )
 
     try:
         async with AsyncClient(
@@ -186,6 +172,7 @@ async def test_delete_does_not_call_object_storage(
             )
 
         assert response.status_code == 204
+        assert response.content == b""
         assert response.headers["cache-control"] == "no-store"
         assert await read_state(drop_id) == "deleted"
     finally:

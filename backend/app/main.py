@@ -30,8 +30,9 @@ async def lifespan(_: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+
 @app.middleware("http")
-async def normalize_metadata_not_found(
+async def normalize_drop_not_found(
     request: Request,
     call_next,
 ):
@@ -40,16 +41,16 @@ async def normalize_metadata_not_found(
     )
     decoded_path = unquote(raw_path)
 
-    # Handle encoded slashes in drop metadata URLs.
-    is_metadata_path = (
-        "/v1/drops/" in decoded_path
-        and decoded_path.endswith("/meta")
+    # Normalize routing-level 404s for encoded slashes in drop IDs.
+    is_drop_action_path = (
+        decoded_path.startswith("/v1/drops/")
+        and decoded_path.endswith(("/meta", "/consume"))
         and "%2f" in raw_path.lower()
     )
 
     response = await call_next(request)
 
-    if is_metadata_path and response.status_code == 404:
+    if is_drop_action_path and response.status_code == 404:
         return JSONResponse(
             status_code=404,
             content={"detail": {"code": "drop_not_found"}},

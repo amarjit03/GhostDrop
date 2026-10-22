@@ -293,3 +293,19 @@ async def test_consume_rolls_back_when_presigning_fails(monkeypatch):
                     text("DELETE FROM drops WHERE id = :id"),
                     {"id": drop_id},
                 )
+
+@pytest.mark.asyncio
+async def test_encoded_slash_drop_id_returns_generic_404():
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/drops/invalid%2Fid/consume"
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "detail": {"code": "drop_not_found"}
+    }
+    assert response.headers["cache-control"] == "no-store"

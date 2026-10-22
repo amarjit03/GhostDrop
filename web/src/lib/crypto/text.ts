@@ -10,6 +10,7 @@ import {
   RECORD_TYPE_DATA,
   RECORD_TYPE_METADATA,
 } from "./constants";
+import { encodeEnvelope, decodeEnvelope } from "./envelope";
 import { deriveContentKeyBytes, importContentKey } from "./kdf";
 import { generateUrlKey, parseUrlKey } from "./key";
 import { encodeMetadata, decodeMetadata } from "./metadata";
@@ -18,18 +19,12 @@ import { encodeFrame, parseFrame } from "./frame";
 import { validateRecordSequence } from "./stream";
 import type { RecordFrame } from "./frame";
 
-const MAX_TEXT_STREAM_BYTES =
-  MAX_TEXT_BYTES +
-  MAX_METADATA_BYTES +
-  2 * (RECORD_HEADER_BYTES + GCM_TAG_BYTES);
-
 export interface EncryptedTextPayload {
-  /** Server-visible identifier, authenticated by every record. */
+  /** Server-visible drop identifier, authenticated by every record. */
   dropId: string;
-  /** Public KDF parameters; these are not secret. */
-  kdfSalt: Uint8Array;
-  noncePrefix: Uint8Array;
-  /** Concatenated framed records: encrypted metadata, then encrypted text. */
+  /** Serialized Ghostdrop envelope containing public crypto parameters. */
+  envelope: Uint8Array;
+  /** Concatenated encrypted metadata and text records. */
   stream: Uint8Array;
 }
 
@@ -39,9 +34,15 @@ export interface EncryptedTextDrop {
   payload: EncryptedTextPayload;
 }
 
+const MAX_TEXT_STREAM_BYTES =
+  MAX_TEXT_BYTES +
+  MAX_METADATA_BYTES +
+  2 * (RECORD_HEADER_BYTES + GCM_TAG_BYTES);
+
 function concatenate(parts: readonly Uint8Array[]): Uint8Array {
-  const total = parts.reduce((sum, part) => sum + part.length, 0);
-  const result = new Uint8Array(total);
+  const totalLength = parts.reduce((sum, part) => sum + part.length, 0);
+  const result = new Uint8Array(totalLength);
+
   let offset = 0;
 
   for (const part of parts) {
@@ -58,11 +59,19 @@ function randomBytes(length: number): Uint8Array {
   return bytes;
 }
 
-/**
- * Split a stream into complete frames.
- * Each frame's declared size is checked before parsing or slicing it.
- */
+function validateDropId(dropId: unknown): asserts dropId is string {
+  if (
+    typeof dropId !== "string" ||
+    !/^[A-Za-z0-9_-]{1,128}$/.test(dropId)
+  ) {
+    throw new Error("Invalid drop ID");
+  }
+}
 
+/**
+ * Split a concatenated stream into exactly two complete text-drop frames.
+ * Enforce size limits before parsing or copying frame bodies.
+ */
 function parseFrameStream(stream: Uint8Array): RecordFrame[] {
   if (stream.length === 0) {
     throw new Error("Invalid stream: stream is empty");
@@ -136,7 +145,6 @@ function parseFrameStream(stream: Uint8Array): RecordFrame[] {
   return frames;
 }
 
-
 async function deriveCryptoKey(
   urlKey: Uint8Array,
   kdfSalt: Uint8Array,
@@ -151,13 +159,18 @@ async function deriveCryptoKey(
 }
 
 /**
- * Encrypt a text secret. The key fragment is returned separately from
- * the payload so callers can keep it out of backend requests.
+ * Encrypt a text drop.
+ *
+ * The key fragment is returned separately and must never be sent
+ * to the backend. The payload contains only the drop ID, envelope,
+ * and encrypted record stream.
  */
 export async function encryptText(
   text: string,
   dropId: string,
 ): Promise<EncryptedTextDrop> {
+  validateDropId(dropId);
+
   if (typeof text !== "string") {
     throw new Error("Text must be a string");
   }
@@ -165,11 +178,13 @@ export async function encryptText(
   const textBytes = new TextEncoder().encode(text);
 
   if (textBytes.length > MAX_TEXT_BYTES) {
+    textBytes.fill(0);
     throw new Error("Text exceeds maximum size");
   }
 
   // Reject unpaired UTF-16 surrogates that TextEncoder would replace.
   if (new TextDecoder("utf-8", { fatal: true }).decode(textBytes) !== text) {
+    textBytes.fill(0);
     throw new Error("Text contains invalid Unicode");
   }
 
@@ -177,10 +192,17 @@ export async function encryptText(
   const kdfSalt = randomBytes(KDF_SALT_BYTES);
   const noncePrefix = randomBytes(NONCE_PREFIX_BYTES);
 
+  let metadataBytes: Uint8Array | undefined;
+
   try {
+    const envelope = encodeEnvelope({
+      noncePrefix,
+      kdfSalt,
+    });
+
     const key = await deriveCryptoKey(keyBytes, kdfSalt);
 
-    const metadata = encodeMetadata({
+    metadataBytes = encodeMetadata({
       contentKind: 1,
       filename: "",
       mimeType: "text/plain",
@@ -196,7 +218,7 @@ export async function encryptText(
       recordIndex: 0,
       recordType: RECORD_TYPE_METADATA,
       finalFlag: 0,
-      plaintext: metadata,
+      plaintext: metadataBytes,
     });
 
     const textRecord = await encryptRecord({
@@ -218,23 +240,25 @@ export async function encryptText(
       keyFragment: fragment,
       payload: {
         dropId,
-        kdfSalt,
-        noncePrefix,
+        envelope,
         stream,
       },
     };
   } finally {
     keyBytes.fill(0);
+    kdfSalt.fill(0);
+    noncePrefix.fill(0);
     textBytes.fill(0);
+    metadataBytes?.fill(0);
   }
 }
 
 /**
- * Decrypt a text secret.
- * Plaintext is returned only after both records authenticate and the
- * complete stream and metadata pass validation.
+ * Decrypt a text drop.
+ *
+ * No plaintext is returned until both records authenticate, metadata
+ * and stream structure validate, and the text is valid UTF-8.
  */
-
 export async function decryptText(
   payload: EncryptedTextPayload,
   keyFragment: string,
@@ -243,50 +267,48 @@ export async function decryptText(
     throw new Error("Invalid text payload");
   }
 
-  if (
-    typeof payload.dropId !== "string" ||
-    !/^[A-Za-z0-9_-]{1,128}$/.test(payload.dropId)
-  ) {
-    throw new Error("Invalid drop ID");
-  }
+  validateDropId(payload.dropId);
 
-  if (
-    !(payload.kdfSalt instanceof Uint8Array) ||
-    payload.kdfSalt.length !== KDF_SALT_BYTES
-  ) {
-    throw new Error("Invalid KDF salt");
-  }
-
-  if (
-    !(payload.noncePrefix instanceof Uint8Array) ||
-    payload.noncePrefix.length !== NONCE_PREFIX_BYTES
-  ) {
-    throw new Error("Invalid nonce prefix");
+  if (!(payload.envelope instanceof Uint8Array)) {
+    throw new Error("Invalid envelope");
   }
 
   if (!(payload.stream instanceof Uint8Array)) {
     throw new Error("Invalid text stream");
   }
 
-  // Copy mutable caller-owned parameters before processing.
-  const kdfSalt = payload.kdfSalt.slice();
-  const noncePrefix = payload.noncePrefix.slice();
+  // Copy mutable caller-owned data before processing.
+  const envelopeBytes = payload.envelope.slice();
   const stream = payload.stream.slice();
 
+  let kdfSalt: Uint8Array | undefined;
+  let noncePrefix: Uint8Array | undefined;
   let urlKey: Uint8Array | undefined;
   let metadataBytes: Uint8Array | undefined;
   let textBytes: Uint8Array | undefined;
 
   try {
+    const envelope = decodeEnvelope(envelopeBytes);
+
+    if (envelope.passwordProtected) {
+      throw new Error(
+        "Password-protected drops are not yet supported",
+      );
+    }
+
+    kdfSalt = envelope.kdfSalt;
+    noncePrefix = envelope.noncePrefix;
+
     const frames = parseFrameStream(stream);
 
+    const metadataFrame = frames[0]!;
+
+    // Authenticate metadata before trusting its contents.
     urlKey = parseUrlKey(keyFragment);
     const key = await deriveCryptoKey(urlKey, kdfSalt);
 
     urlKey.fill(0);
     urlKey = undefined;
-
-    const metadataFrame = frames[0]!;
 
     metadataBytes = await decryptRecord(
       {
@@ -309,6 +331,7 @@ export async function decryptText(
 
     const textFrame = frames[1]!;
 
+    // Authenticate the data record before returning any plaintext.
     textBytes = await decryptRecord(
       {
         key,
@@ -326,7 +349,6 @@ export async function decryptText(
       throw new Error("Invalid text record length");
     }
 
-    // Validate both records and the authenticated metadata together.
     validateRecordSequence(frames, metadata);
 
     if (metadata.contentKind !== 1) {
@@ -342,9 +364,9 @@ export async function decryptText(
     urlKey?.fill(0);
     metadataBytes?.fill(0);
     textBytes?.fill(0);
-    kdfSalt.fill(0);
-    noncePrefix.fill(0);
+    kdfSalt?.fill(0);
+    noncePrefix?.fill(0);
+    envelopeBytes.fill(0);
     stream.fill(0);
   }
 }
-

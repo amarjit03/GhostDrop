@@ -111,4 +111,39 @@ describe("record frame", () => {
       ),
     ).toThrow("Plaintext exceeds record size limit");
   });
+
+    it("rejects an invalid final flag when encoding", () => {
+    expect(() =>
+      encodeFrame(makeFrame({ finalFlag: 2 as 0 | 1 })),
+    ).toThrow("Invalid final flag");
+  });
+
+  it("rejects a truncated authentication tag", () => {
+    const header = new Uint8Array(10);
+    header[4] = 1;
+    header[5] = 1;
+    new DataView(header.buffer).setUint32(6, 0, false);
+
+    expect(() => parseFrame(header)).toThrow("Truncated record body");
+  });
+
+  it("rejects a metadata record exceeding the metadata limit", () => {
+    const length = 65_537;
+
+    expect(() =>
+      encodeFrame(
+        makeFrame({
+          type: 0,
+          plaintextLength: length,
+          body: new Uint8Array(length + GCM_TAG_BYTES),
+        }),
+      ),
+    ).toThrow("Plaintext exceeds record size limit");
+  });
+
+  it("rejects a fractional record index", () => {
+    expect(() =>
+      encodeFrame(makeFrame({ index: 1.5 })),
+    ).toThrow("Invalid record index");
+  });
 });

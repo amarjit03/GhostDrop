@@ -85,4 +85,30 @@ describe("AES-GCM record", () => {
       "Unable to decrypt record",
     );
   });
+
+    it.each([
+    ["different drop ID", { dropId: "10112233445566778899aabbccddeeff" }],
+    ["different record index", { recordIndex: 2 }],
+    ["different record type", { recordType: 0 }],
+    ["different final flag", { finalFlag: 0 as const }],
+  ])("rejects decryption with %s", async (_label, changes) => {
+    const keyBytes = new Uint8Array(32);
+    const key = await importContentKey(keyBytes);
+
+    const input = {
+      key,
+      noncePrefix: hexToBytes("01020304050607"),
+      dropId: "00112233445566778899aabbccddeeff",
+      recordIndex: 1,
+      recordType: 1,
+      finalFlag: 1 as const,
+      plaintext: new TextEncoder().encode("hello"),
+    };
+
+    const encrypted = await encryptRecord(input);
+
+    await expect(
+      decryptRecord({ ...input, ...changes }, encrypted.body),
+    ).rejects.toThrow("Unable to decrypt record");
+  });
 });

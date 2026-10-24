@@ -2,61 +2,48 @@
 #!/usr/bin/env python3
 """Independent Ghostdrop v1 crypto-vector verification."""
 
+import json
+from pathlib import Path
+
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+VECTOR_PATH = REPO_ROOT / "tests" / "vectors" / "v1-record.json"
 
-# Fixed values from the Ghostdrop v1 protocol specification.
-URL_KEY = bytes.fromhex(
-    "000102030405060708090a0b0c0d0e0f"
-    "101112131415161718191a1b1c1d1e1f"
-)
+VECTOR = json.loads(VECTOR_PATH.read_text(encoding="utf-8"))
 
-KDF_SALT = bytes.fromhex(
-    "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"
-    "b0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
-)
+URL_KEY = bytes.fromhex(VECTOR["url_key_hex"])
+KDF_SALT = bytes.fromhex(VECTOR["kdf_salt_hex"])
+EXPECTED_KEY = bytes.fromhex(VECTOR["derived_key_hex"])
 
-EXPECTED_KEY = bytes.fromhex(
-    "cd12dd1230882b16941d09612c81fe48"
-    "8bbf7c1bb702d44e893da0a182ec0232"
-)
+NONCE_PREFIX = bytes.fromhex(VECTOR["nonce_prefix_hex"])
+DROP_ID = VECTOR["drop_id"]
+PLAINTEXT = bytes.fromhex(VECTOR["plaintext_hex"])
 
-NONCE_PREFIX = bytes.fromhex("01020304050607")
-DROP_ID = "00112233445566778899aabbccddeeff"
-PLAINTEXT = b"hello"
+EXPECTED_NONCE = bytes.fromhex(VECTOR["nonce_hex"])
+EXPECTED_AAD = bytes.fromhex(VECTOR["aad_hex"])
+EXPECTED_BODY = bytes.fromhex(VECTOR["ciphertext_and_tag_hex"])
 
-EXPECTED_NONCE = bytes.fromhex("010203040506070000000101")
-
-EXPECTED_AAD = bytes.fromhex(
-    "47686f737464726f702f414541442f7631"
-    "0001002030303131323233333434353536"
-    "363737383839396161626263636464656566"
-    "660100000001010000000500200000"
-)
-
-EXPECTED_BODY = bytes.fromhex(
-    "f2012492d7227b9baf5700f382809f4667858db6f9"
-)
-
-CHUNK_SIZE = 2_097_152
+CHUNK_SIZE = VECTOR["chunk_size"]
 FORMAT_VERSION = 1
-RECORD_TYPE_DATA = 1
-FINAL_FLAG = 1
+RECORD_TYPE_DATA = VECTOR["record_type"]
+FINAL_FLAG = VECTOR["final_flag"]
+RECORD_INDEX = VECTOR["record_index"]
 
 
 def derive_key() -> bytes:
+    info = VECTOR["hkdf_info_utf8"].encode("utf-8")
     return HKDF(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=KDF_SALT,
-        info=b"Ghostdrop/v1/content-encryption-key",
-    ).derive(URL_KEY)
-
+       algorithm=hashes.SHA256(),
+       length=32,
+       salt=KDF_SALT,
+       info=info,
+       ).derive(URL_KEY)
 
 def build_nonce() -> bytes:
-    return NONCE_PREFIX + (1).to_bytes(4, "big") + bytes([FINAL_FLAG])
+    return NONCE_PREFIX + RECORD_INDEX.to_bytes(4, "big") + bytes([FINAL_FLAG])
 
 
 def build_aad() -> bytes:

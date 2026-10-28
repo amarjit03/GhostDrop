@@ -1,0 +1,64 @@
+# Place at: .github/workflows/security.yml
+#
+# Dependency vulnerability audit. Runs weekly, when a lockfile changes in a PR,
+# and on demand. Do NOT make it a required check: a new advisory in an
+# unrelated package would block every PR until fixed.
+
+name: Security audit
+
+on:
+  schedule:
+    - cron: "17 3 * * 1" # Mondays, 03:17 UTC
+  pull_request:
+    paths:
+      - "web/pnpm-lock.yaml"
+      - "backend/uv.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  web-audit:
+    name: web dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # Needs the "packageManager" field in web/package.json (see ci.yml).
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      # Production dependencies only, fails on high or critical advisories.
+      - run: pnpm audit --prod --audit-level=high
+
+  backend-audit:
+    name: backend dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Export pinned production dependencies
+        run: uv export --frozen --no-dev --no-hashes --no-emit-project -o "$RUNNER_TEMP/requirements.txt"
+
+      - name: Audit
+        run: uvx pip-audit -r "$RUNNER_TEMP/requirements.txt" --disable-pip --no-deps

@@ -1,0 +1,162 @@
+# Place at: .github/workflows/ci.yml
+#
+# Runs on every pull request and every push to main.
+# Make "web" and "backend" REQUIRED status checks in branch protection,
+# so nothing reaches main (and therefore deploys) without passing both.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same branch cancels the older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI only needs to read the repo.
+permissions:
+  contents: read
+
+env:
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Frontend: web/
+  # ---------------------------------------------------------------------------
+  web:
+    name: web
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    env:
+      # Dummy values so `next build` passes config validation.
+      # Real values live in the hosting platform (Vercel), never in this file.
+      NEXT_PUBLIC_API_BASE_URL: https://api.ci.invalid
+      NEXT_PUBLIC_SITE_URL: https://ci.invalid
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # Reads the pnpm version from the "packageManager" field in web/package.json.
+      # If that field is missing, run once locally in web/:
+      #   corepack enable && corepack use pnpm@$(pnpm --version)
+      # and commit the change. It also pins pnpm for everyone on the project.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      # Fails if pnpm-lock.yaml is out of sync with package.json.
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm lint
+      - run: pnpm typecheck
+
+      # The "test" script must be `vitest run` (one-shot), not watch mode.
+      - run: pnpm test
+
+      # Speeds up repeat builds (recommended in the Next.js CI docs).
+      - uses: actions/cache@v5
+        with:
+          path: web/.next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('web/pnpm-lock.yaml') }}-${{ hashFiles('web/src/**') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles('web/pnpm-lock.yaml') }}-
+
+      - run: pnpm build
+
+  # ---------------------------------------------------------------------------
+  # Backend: backend/
+  # ---------------------------------------------------------------------------
+  backend:
+    name: backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: postgres:16 # match the version in your docker-compose file
+        env:
+          POSTGRES_USER: ghostdrop
+          POSTGRES_PASSWORD: ghostdrop
+          POSTGRES_DB: ghostdrop_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ghostdrop -d ghostdrop_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # WARNING: these names are guesses. Rename them to match the settings
+      # your app actually reads (check backend/app/config.py or your .env.example).
+      DATABASE_URL: postgresql+asyncpg://ghostdrop:ghostdrop@localhost:5432/ghostdrop_test
+      S3_ENDPOINT_URL: http://localhost:9000
+      S3_ACCESS_KEY: ci-access-key
+      S3_SECRET_KEY: ci-secret-key
+      S3_BUCKET: ghostdrop-ci
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # setup-uv v8+ publishes immutable tags only (no floating "@v8").
+      # Dependabot (see dependabot.yml) will propose newer full versions.
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      # Fails if uv.lock is out of date. Installs the dev group too.
+      - run: uv sync --locked
+
+      - name: Lint
+        run: uv run ruff check .
+
+      # If this fails the first time, run `uv run ruff format .` once and commit.
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Apply migrations to a fresh database
+        run: uv run alembic upgrade head
+
+      # Fails if the models changed but nobody wrote a migration.
+      - name: Check models match migrations
+        run: uv run alembic check
+
+      - name: Tests
+        run: uv run pytest
+
+      # Runs the cleanup worker once against the real database.
+      # If it needs MinIO (storage), delete this step or add a MinIO container.
+      - name: Cleanup worker smoke test
+        run: uv run python -m app.workers.cleanup --once
+
+      # Only runs once a backend/Dockerfile exists.
+      - name: Build Docker image (no push)
+        if: ${{ hashFiles('backend/Dockerfile') != '' }}
+        run: docker build -t ghostdrop-backend:ci .
+
+# -----------------------------------------------------------------------------
+# Later additions:
+#  - A job that starts the backend + MinIO and runs backend/scripts/api_test.sh
+#    (the black-box suite). Needs the script's env vars: tell me and I will wire it.
+#  - A Playwright end-to-end job once Phase 7 exists in web/.
+# -----------------------------------------------------------------------------

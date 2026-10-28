@@ -1,0 +1,51 @@
+# Place at: .github/dependabot.yml
+#
+# Weekly update PRs. The 7-day cooldown skips releases that are only days old
+# (supply-chain hygiene). Security fixes are not delayed by the cooldown.
+# Minor and patch bumps are grouped into one PR per ecosystem to cut noise.
+
+version: 2
+
+updates:
+  # Frontend (the "npm" ecosystem also handles pnpm lockfiles)
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      web-minor-and-patch:
+        update-types: [minor, patch]
+
+  # Backend (uv.lock)
+  - package-ecosystem: uv
+    directory: /backend
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      backend-minor-and-patch:
+        update-types: [minor, patch]
+
+  # Versions used in .github/workflows/*.yml
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Base image in backend/Dockerfile. Delete this block if you have no Dockerfile.
+  - package-ecosystem: docker
+    directory: /backend
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

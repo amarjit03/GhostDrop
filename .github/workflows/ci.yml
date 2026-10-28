@@ -40,7 +40,7 @@ jobs:
       NEXT_PUBLIC_API_BASE_URL: https://api.ci.invalid
       NEXT_PUBLIC_SITE_URL: https://ci.invalid
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -48,11 +48,11 @@ jobs:
       # If that field is missing, run once locally in web/:
       #   corepack enable && corepack use pnpm@$(pnpm --version)
       # and commit the change. It also pins pnpm for everyone on the project.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: web/package.json
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -68,7 +68,7 @@ jobs:
       - run: pnpm test
 
       # Speeds up repeat builds (recommended in the Next.js CI docs).
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: web/.next/cache
           key: nextjs-${{ runner.os }}-${{ hashFiles('web/pnpm-lock.yaml') }}-${{ hashFiles('web/src/**') }}
@@ -113,13 +113,13 @@ jobs:
       S3_BUCKET: ghostdrop-ci
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       # setup-uv v8+ publishes immutable tags only (no floating "@v8").
       # Dependabot (see dependabot.yml) will propose newer full versions.
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@v10.3.1
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock

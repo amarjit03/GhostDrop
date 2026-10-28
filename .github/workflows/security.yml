@@ -27,16 +27,16 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       # Needs the "packageManager" field in web/package.json (see ci.yml).
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: web/package.json
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -51,11 +51,11 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@v10.3.1
 
       - name: Export pinned production dependencies
         run: uv export --frozen --no-dev --no-hashes --no-emit-project -o "$RUNNER_TEMP/requirements.txt"

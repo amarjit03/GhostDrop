@@ -22,10 +22,15 @@ interface DownloadRecord {
   url: string;
 }
 
+interface OpenDropResult {
+  plaintext: string;
+}
+
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const HEADER_BYTES = 10;
 const GCM_TAG_BYTES = 16;
 const MAX_FRAME_BYTES = MAX_TEXT_BYTES + HEADER_BYTES + GCM_TAG_BYTES;
+const DOWNLOAD_TIMEOUT_MS = 30_000;
 
 async function downloadFrames(
   records: DownloadRecord[],
@@ -58,18 +63,40 @@ async function downloadFrames(
         throw new Error("The server returned an invalid download URL.");
       }
 
-      const response = await fetch(url, {
-        method: "GET",
-        cache: "no-store",
-        credentials: "omit",
-        referrerPolicy: "no-referrer",
-      });
+      const controller = new AbortController();
+      let timedOut = false;
 
-      if (!response.ok) {
+      const timeoutId = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, DOWNLOAD_TIMEOUT_MS);
+
+      let bytes: Uint8Array;
+
+      try {
+        const response = await fetch(url, {
+          method: "GET",
+          cache: "no-store",
+          credentials: "omit",
+          referrerPolicy: "no-referrer",
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error("Unable to download the encrypted content.");
+        }
+
+        // The timeout also covers reading the response body.
+        bytes = new Uint8Array(await response.arrayBuffer());
+      } catch {
+        if (timedOut) {
+          throw new Error("Encrypted download timed out.");
+        }
+
         throw new Error("Unable to download the encrypted content.");
+      } finally {
+        window.clearTimeout(timeoutId);
       }
-
-      const bytes = new Uint8Array(await response.arrayBuffer());
 
       if (bytes.length !== record.frame_bytes) {
         bytes.fill(0);
@@ -83,8 +110,8 @@ async function downloadFrames(
       (sum, frame) => sum + frame.length,
       0,
     );
-    const stream = new Uint8Array(totalLength);
 
+    const stream = new Uint8Array(totalLength);
     let offset = 0;
 
     for (const frame of frames) {
@@ -112,6 +139,10 @@ function getSafeErrorMessage(error: unknown): string {
   }
 
   if (error instanceof Error) {
+    if (/timed out/i.test(error.message)) {
+      return "The encrypted download timed out. Your view may already have been used, so avoid refreshing the link.";
+    }
+
     if (/url key|key fragment|decoded url key/i.test(error.message)) {
       return "The share link is missing a valid decryption key.";
     }
@@ -132,6 +163,56 @@ function getSafeErrorMessage(error: unknown): string {
   return "Unable to open this drop. It may have expired, been consumed, or become unavailable.";
 }
 
+/**
+ * Runs the one-time consume/download/decrypt operation.
+ *
+ * Keeping the promise in a ref allows React Strict Mode's effect replay
+ * to reuse the same operation instead of consuming a second view.
+ */
+async function openDrop(id: string): Promise<OpenDropResult> {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
+    throw new Error("Invalid drop ID.");
+  }
+
+  // The URL fragment is available only in the browser.
+  const keyFragment = window.location.hash;
+  const checkedKey = parseUrlKey(keyFragment);
+  checkedKey.fill(0);
+
+  let envelopeBytes: Uint8Array | undefined;
+  let stream: Uint8Array | undefined;
+
+  try {
+    // Do not automatically retry this view-consuming request.
+    const drop = await consumeDrop(id);
+
+    if (drop.password_required) {
+      throw new Error("Password-protected drops are not yet supported.");
+    }
+
+    if (drop.record_count !== 2 || drop.records.length !== 2) {
+      throw new Error("This drop has an invalid record count.");
+    }
+
+    envelopeBytes = decodeBase64Url(drop.envelope);
+    stream = await downloadFrames(drop.records);
+
+    const plaintext = await decryptText(
+      {
+        dropId: id,
+        envelope: envelopeBytes,
+        stream,
+      },
+      keyFragment,
+    );
+
+    return { plaintext };
+  } finally {
+    stream?.fill(0);
+    envelopeBytes?.fill(0);
+  }
+}
+
 export default function RecipientClient({ id }: RecipientClientProps) {
   const [status, setStatus] = useState<PageState>("loading");
   const [message, setMessage] = useState(
@@ -139,86 +220,40 @@ export default function RecipientClient({ id }: RecipientClientProps) {
   );
   const [plaintext, setPlaintext] = useState("");
 
-  const started = useRef(false);
+  // One promise per ID prevents a duplicate consume request during effect replay.
+  const operations = useRef(
+    new Map<string, Promise<OpenDropResult>>(),
+  );
 
   useEffect(() => {
-    if (started.current) {
-      return;
+    let active = true;
+
+    let operation = operations.current.get(id);
+
+    if (!operation) {
+      operation = openDrop(id);
+      operations.current.set(id, operation);
     }
 
-    started.current = true;
+    void operation.then(
+      (result) => {
+        if (!active) return;
 
-    let cancelled = false;
-    let decryptedText: string | undefined;
-    let stream: Uint8Array | undefined;
-    let envelopeBytes: Uint8Array | undefined;
-
-    async function openDrop() {
-      try {
-        if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
-          throw new Error("Invalid drop ID.");
-        }
-
-        // URL fragments are available only in the browser.
-        // Validate the key before reserving a view.
-        const keyFragment = window.location.hash;
-        const checkedKey = parseUrlKey(keyFragment);
-        checkedKey.fill(0);
-
-        const drop = await consumeDrop(id);
-
-        if (drop.password_required) {
-          throw new Error(
-            "Password-protected drops are not yet supported.",
-          );
-        }
-
-        if (
-          drop.record_count !== 2 ||
-          drop.records.length !== 2
-        ) {
-          throw new Error("This drop has an invalid record count.");
-        }
-
-        envelopeBytes = decodeBase64Url(drop.envelope);
-        stream = await downloadFrames(drop.records);
-
-        if (cancelled) {
-          return;
-        }
-
-        decryptedText = await decryptText(
-          {
-            dropId: id,
-            envelope: envelopeBytes,
-            stream,
-          },
-          keyFragment,
-        );
-
-        if (cancelled) {
-          return;
-        }
-
-        setPlaintext(decryptedText);
-        setStatus("success");
+        setPlaintext(result.plaintext);
         setMessage("Decryption successful.");
-      } catch (error) {
-        if (!cancelled) {
-          setMessage(getSafeErrorMessage(error));
-          setStatus("error");
-        }
-      } finally {
-        stream?.fill(0);
-        envelopeBytes?.fill(0);
-        decryptedText = undefined;
-      }
-    }
+        setStatus("success");
+      },
+      (error: unknown) => {
+        if (!active) return;
 
-    void openDrop();
+        setMessage(getSafeErrorMessage(error));
+        setStatus("error");
+      },
+    );
 
     return () => {
-      cancelled = true;
+      // Ignore this effect's result if it is no longer active.
+      active = false;
     };
   }, [id]);
 

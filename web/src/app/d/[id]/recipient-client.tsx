@@ -7,7 +7,10 @@ import Link from "next/link";
 import { consumeDrop } from "@/lib/api/drops";
 import { ApiError } from "@/lib/api/errors";
 import { decodeBase64Url } from "@/lib/crypto/encoding";
-import { parseUrlKey } from "@/lib/crypto/key";
+import {
+  captureKey,
+  clearCapturedKey,
+} from "@/lib/crypto/key-store";
 import { decryptText } from "@/lib/crypto/text";
 
 interface RecipientClientProps {
@@ -175,9 +178,7 @@ async function openDrop(id: string): Promise<OpenDropResult> {
   }
 
   // The URL fragment is available only in the browser.
-  const keyFragment = window.location.hash;
-  const checkedKey = parseUrlKey(keyFragment);
-  checkedKey.fill(0);
+  const keyFragment = captureKey(id);
 
   let envelopeBytes: Uint8Array | undefined;
   let stream: Uint8Array | undefined;
@@ -210,6 +211,7 @@ async function openDrop(id: string): Promise<OpenDropResult> {
   } finally {
     stream?.fill(0);
     envelopeBytes?.fill(0);
+    clearCapturedKey(id);
   }
 }
 

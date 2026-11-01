@@ -1,6 +1,22 @@
-
+import type { Metadata } from "next";
 import { Suspense } from "react";
+
+import { SiteShell } from "../../site-shell";
 import RecipientClient from "./recipient-client";
+
+export const metadata: Metadata = {
+  title: "Private Drop",
+  description: "Open a private encrypted drop securely.",
+  robots: {
+    index: false,
+    follow: false,
+    googleBot: {
+      index: false,
+      follow: false,
+      noimageindex: true,
+    },
+  },
+};
 
 interface RecipientPageProps {
   params: Promise<{ id: string }>;
@@ -15,29 +31,19 @@ async function RecipientContent({
 
 function RecipientLoading() {
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col px-5 py-8 sm:px-8">
-      <header className="border-b border-white/10 pb-5">
-        <span className="text-sm font-semibold text-zinc-100">
-          Ghostdrop
-        </span>
-      </header>
-
+    <SiteShell className="mx-auto flex w-full max-w-3xl flex-col px-5 py-8 sm:px-8" compact>
       <section className="mx-auto flex w-full max-w-xl flex-1 flex-col justify-center py-12">
-        <p className="text-sm font-medium text-violet-300">
+        <p className="text-sm font-medium uppercase tracking-[0.18em] text-[var(--muted)]">
           Private drop
         </p>
-        <h1 className="mt-3 text-3xl font-semibold tracking-tight">
+        <h1 className="mt-3 text-3xl font-semibold tracking-[-0.06em] text-[var(--text)] sm:text-4xl">
           Opening your secret…
         </h1>
-        <p className="mt-3 text-sm text-zinc-400" role="status">
+        <p className="mt-3 text-sm text-[var(--muted)]" role="status">
           Preparing the secure recipient page…
         </p>
       </section>
-
-      <footer className="border-t border-white/[0.06] pt-5 text-center text-xs text-zinc-600">
-        Ghostdrop · Your key stays in the browser
-      </footer>
-    </main>
+    </SiteShell>
   );
 }
 

@@ -1,23 +1,41 @@
-
 @import "tailwindcss";
 
 :root {
-  color-scheme: dark;
-  --background: #09090b;
-  --surface: #111114;
-  --surface-raised: #18181d;
-  --border: #292930;
-  --foreground: #fafafa;
-  --muted: #a1a1aa;
-  --accent: #a78bfa;
-  --accent-strong: #8b5cf6;
-  --danger: #fca5a5;
+  --background: #f6f7f9;
+  --surface: #ffffff;
+  --surface-strong: #eef1f7;
+  --surface-inset: rgba(17, 24, 39, 0.02);
+  --border: rgba(15, 23, 42, 0.12);
+  --border-strong: rgba(91, 78, 246, 0.2);
+  --text: #111827;
+  --muted: #5a6475;
+  --accent: #5b4ef6;
+  --accent-soft: #e9e4ff;
+  --danger: #b42318;
+  --success: #106c45;
+  --focus-ring: #4f46e5;
+  --font-sans: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SFMono-Regular", "SFMono", "Consolas", "Liberation Mono", monospace;
+  color-scheme: light;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: Arial, Helvetica, sans-serif;
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #09090b;
+    --surface: #111318;
+    --surface-strong: #171a22;
+    --surface-inset: rgba(255, 255, 255, 0.02);
+    --border: rgba(148, 163, 184, 0.22);
+    --border-strong: rgba(167, 139, 250, 0.36);
+    --text: #f5f7fb;
+    --muted: #a3adbd;
+    --accent: #a78bfa;
+    --accent-soft: #221b3d;
+    --danger: #fca5a5;
+    --success: #34d399;
+    --focus-ring: #a78bfa;
+    color-scheme: dark;
+  }
 }
 
 * {
@@ -27,6 +45,7 @@
 html {
   min-height: 100%;
   background: var(--background);
+  color: var(--text);
   scroll-behavior: smooth;
 }
 
@@ -35,19 +54,21 @@ body {
   margin: 0;
   background:
     radial-gradient(
-      ellipse at 50% 0%,
-      rgb(139 92 246 / 10%),
+      ellipse at top,
+      rgba(91, 78, 246, 0.12),
       transparent 42rem
     ),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 18%),
     var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  color: var(--text);
+  font-family: var(--font-sans);
+  line-height: 1.5;
   font-feature-settings: "ss01" on;
 }
 
 ::selection {
-  background: rgb(167 139 250 / 30%);
-  color: white;
+  background: rgba(91, 78, 246, 0.18);
+  color: var(--text);
 }
 
 button,
@@ -66,7 +87,7 @@ input:focus-visible,
 textarea:focus-visible,
 select:focus-visible,
 a:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 3px;
 }
 
@@ -79,7 +100,7 @@ a {
 }
 
 ::placeholder {
-  color: #71717a;
+  color: var(--muted);
   opacity: 1;
 }
 

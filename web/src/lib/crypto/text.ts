@@ -1,4 +1,3 @@
-
 import {
   CHUNK_SIZE_BYTES,
   GCM_TAG_BYTES,
@@ -6,6 +5,7 @@ import {
   MAX_METADATA_BYTES,
   MAX_TEXT_BYTES,
   NONCE_PREFIX_BYTES,
+  PASSWORD_SALT_BYTES,
   RECORD_HEADER_BYTES,
   RECORD_TYPE_DATA,
   RECORD_TYPE_METADATA,
@@ -17,6 +17,7 @@ import { encodeMetadata, decodeMetadata } from "./metadata";
 import { encryptRecord, decryptRecord } from "./records";
 import { encodeFrame, parseFrame } from "./frame";
 import { validateRecordSequence } from "./stream";
+import { derivePasswordKeyBytes } from "./password";
 import type { RecordFrame } from "./frame";
 
 export interface EncryptedTextPayload {
@@ -148,7 +149,34 @@ function parseFrameStream(stream: Uint8Array): RecordFrame[] {
 async function deriveCryptoKey(
   urlKey: Uint8Array,
   kdfSalt: Uint8Array,
+  password?: string,
+  passwordSalt?: Uint8Array,
 ): Promise<CryptoKey> {
+  const hasPassword = typeof password === "string" && password.length > 0;
+
+  if (hasPassword) {
+    if (!(passwordSalt instanceof Uint8Array) || passwordSalt.length !== PASSWORD_SALT_BYTES) {
+      throw new Error("Invalid password salt length");
+    }
+
+    const passwordKey = await derivePasswordKeyBytes(password, passwordSalt);
+    const combined = new Uint8Array(urlKey.length + passwordKey.length);
+    combined.set(urlKey, 0);
+    combined.set(passwordKey, urlKey.length);
+    passwordKey.fill(0);
+
+    try {
+      const rawKey = await deriveContentKeyBytes(combined, kdfSalt);
+      try {
+        return await importContentKey(rawKey);
+      } finally {
+        rawKey.fill(0);
+      }
+    } finally {
+      combined.fill(0);
+    }
+  }
+
   const rawKey = await deriveContentKeyBytes(urlKey, kdfSalt);
 
   try {
@@ -168,12 +196,16 @@ async function deriveCryptoKey(
 export async function encryptText(
   text: string,
   dropId: string,
+  password?: string,
 ): Promise<EncryptedTextDrop> {
   validateDropId(dropId);
 
   if (typeof text !== "string") {
     throw new Error("Text must be a string");
   }
+
+  const passwordEnabled = typeof password === "string" && password.length > 0;
+  const passwordSalt = passwordEnabled ? randomBytes(PASSWORD_SALT_BYTES) : undefined;
 
   const textBytes = new TextEncoder().encode(text);
 
@@ -198,9 +230,15 @@ export async function encryptText(
     const envelope = encodeEnvelope({
       noncePrefix,
       kdfSalt,
+      ...(passwordSalt ? { passwordSalt } : {}),
     });
 
-    const key = await deriveCryptoKey(keyBytes, kdfSalt);
+    const key = await deriveCryptoKey(
+      keyBytes,
+      kdfSalt,
+      passwordEnabled ? password : undefined,
+      passwordEnabled ? passwordSalt : undefined,
+    );
 
     metadataBytes = encodeMetadata({
       contentKind: 1,
@@ -250,6 +288,7 @@ export async function encryptText(
     noncePrefix.fill(0);
     textBytes.fill(0);
     metadataBytes?.fill(0);
+    passwordSalt?.fill(0);
   }
 }
 
@@ -262,6 +301,7 @@ export async function encryptText(
 export async function decryptText(
   payload: EncryptedTextPayload,
   keyFragment: string,
+  password?: string,
 ): Promise<string> {
   if (payload === null || typeof payload !== "object") {
     throw new Error("Invalid text payload");
@@ -277,7 +317,6 @@ export async function decryptText(
     throw new Error("Invalid text stream");
   }
 
-  // Copy mutable caller-owned data before processing.
   const envelopeBytes = payload.envelope.slice();
   const stream = payload.stream.slice();
 
@@ -290,22 +329,23 @@ export async function decryptText(
   try {
     const envelope = decodeEnvelope(envelopeBytes);
 
-    if (envelope.passwordProtected) {
-      throw new Error(
-        "Password-protected drops are not yet supported",
-      );
+    if (envelope.passwordProtected && (!password || password.length === 0)) {
+      throw new Error("Password required to decrypt this drop.");
     }
 
     kdfSalt = envelope.kdfSalt;
     noncePrefix = envelope.noncePrefix;
 
     const frames = parseFrameStream(stream);
-
     const metadataFrame = frames[0]!;
 
-    // Authenticate metadata before trusting its contents.
     urlKey = parseUrlKey(keyFragment);
-    const key = await deriveCryptoKey(urlKey, kdfSalt);
+    const key = await deriveCryptoKey(
+      urlKey,
+      kdfSalt,
+      envelope.passwordProtected ? password : undefined,
+      envelope.passwordProtected ? envelope.passwordSalt : undefined,
+    );
 
     urlKey.fill(0);
     urlKey = undefined;
@@ -328,22 +368,27 @@ export async function decryptText(
     }
 
     const metadata = decodeMetadata(metadataBytes);
-
     const textFrame = frames[1]!;
 
-    // Authenticate the data record before returning any plaintext.
-    textBytes = await decryptRecord(
-      {
-        key,
-        noncePrefix,
-        dropId: payload.dropId,
-        recordIndex: textFrame.index,
-        recordType: textFrame.type,
-        finalFlag: textFrame.finalFlag,
-        plaintext: new Uint8Array(0),
-      },
-      textFrame.body,
-    );
+    try {
+      textBytes = await decryptRecord(
+        {
+          key,
+          noncePrefix,
+          dropId: payload.dropId,
+          recordIndex: textFrame.index,
+          recordType: textFrame.type,
+          finalFlag: textFrame.finalFlag,
+          plaintext: new Uint8Array(0),
+        },
+        textFrame.body,
+      );
+    } catch {
+      if (envelope.passwordProtected) {
+        throw new Error("Incorrect password or invalid key.");
+      }
+      throw new Error("Unable to decrypt this drop. The link may be invalid or the content may have been altered.");
+    }
 
     if (textBytes.length !== textFrame.plaintextLength) {
       throw new Error("Invalid text record length");

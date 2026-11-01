@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useEffect, useRef, useState } from "react";
@@ -172,7 +171,7 @@ function getSafeErrorMessage(error: unknown): string {
  * Keeping the promise in a ref allows React Strict Mode's effect replay
  * to reuse the same operation instead of consuming a second view.
  */
-async function openDrop(id: string): Promise<OpenDropResult> {
+async function openDrop(id: string, password?: string): Promise<OpenDropResult> {
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
     throw new Error("Invalid drop ID.");
   }
@@ -188,7 +187,9 @@ async function openDrop(id: string): Promise<OpenDropResult> {
     const drop = await consumeDrop(id);
 
     if (drop.password_required) {
-      throw new Error("Password-protected drops are not yet supported.");
+      if (typeof password !== "string" || password.length === 0) {
+        throw new Error("Password is required to open this drop.");
+      }
     }
 
     if (drop.record_count !== 2 || drop.records.length !== 2) {
@@ -205,6 +206,7 @@ async function openDrop(id: string): Promise<OpenDropResult> {
         stream,
       },
       keyFragment,
+      password,
     );
 
     return { plaintext };
@@ -221,6 +223,9 @@ export default function RecipientClient({ id }: RecipientClientProps) {
     "Downloading and decrypting your secret…",
   );
   const [plaintext, setPlaintext] = useState("");
+  const [password, setPassword] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [passwordPending, setPasswordPending] = useState(false);
 
   // One promise per ID prevents a duplicate consume request during effect replay.
   const operations = useRef(
@@ -233,7 +238,7 @@ export default function RecipientClient({ id }: RecipientClientProps) {
     let operation = operations.current.get(id);
 
     if (!operation) {
-      operation = openDrop(id);
+      operation = openDrop(id, password || undefined);
       operations.current.set(id, operation);
     }
 
@@ -248,6 +253,13 @@ export default function RecipientClient({ id }: RecipientClientProps) {
       (error: unknown) => {
         if (!active) return;
 
+        if (error instanceof Error && /password/i.test(error.message)) {
+          setPasswordError(error.message);
+          setStatus("error");
+          setMessage("This drop is password protected.");
+          return;
+        }
+
         setMessage(getSafeErrorMessage(error));
         setStatus("error");
       },
@@ -257,7 +269,40 @@ export default function RecipientClient({ id }: RecipientClientProps) {
       // Ignore this effect's result if it is no longer active.
       active = false;
     };
-  }, [id]);
+  }, [id, password]);
+
+  const runPasswordOpen = async () => {
+    if (!password.trim()) {
+      setPasswordError("Enter the password to unlock this drop.");
+      return;
+    }
+
+    setPasswordPending(true);
+    setPasswordError("");
+    setStatus("loading");
+    setMessage("Checking the password and decrypting your secret…");
+
+    try {
+      const result = await openDrop(id, password);
+      setPlaintext(result.plaintext);
+      setMessage("Decryption successful.");
+      setStatus("success");
+    } catch (error) {
+      setMessage(
+        error instanceof Error && /password|incorrect/i.test(error.message)
+          ? "That password did not work. Please try again."
+          : getSafeErrorMessage(error),
+      );
+      setPasswordError(
+        error instanceof Error && /password|incorrect/i.test(error.message)
+          ? "That password did not work. Please try again."
+          : "",
+      );
+      setStatus("error");
+    } finally {
+      setPasswordPending(false);
+    }
+  };
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col px-5 py-8 sm:px-8">
@@ -309,6 +354,51 @@ export default function RecipientClient({ id }: RecipientClientProps) {
           </div>
         )}
 
+        {status === "error" && !plaintext && (
+          <div className="space-y-4 rounded-2xl border border-red-400/20 bg-red-400/[0.04] p-5">
+            <div>
+              <label
+                htmlFor="drop-password"
+                className="mb-2 block text-sm font-medium text-zinc-200"
+              >
+                Password
+              </label>
+              <input
+                id="drop-password"
+                type="password"
+                value={password}
+                onChange={(event) => {
+                  setPassword(event.target.value);
+                  setPasswordError("");
+                }}
+                placeholder="Enter the drop password"
+                disabled={passwordPending}
+                className="w-full rounded-xl border border-white/10 bg-zinc-900 px-3 py-3 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-violet-400/60 disabled:opacity-60"
+              />
+            </div>
+
+            {passwordError && (
+              <p className="text-sm text-red-200">{passwordError}</p>
+            )}
+
+            <button
+              type="button"
+              onClick={runPasswordOpen}
+              disabled={passwordPending || !password.trim()}
+              className="w-full rounded-xl bg-violet-400 px-5 py-3 text-sm font-semibold text-zinc-950 transition hover:bg-violet-300 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {passwordPending ? "Checking password…" : "Open drop"}
+            </button>
+
+            <Link
+              href="/"
+              className="inline-flex rounded-lg border border-white/10 px-4 py-2.5 text-sm text-zinc-200 transition hover:bg-white/5"
+            >
+              Go to Ghostdrop
+            </Link>
+          </div>
+        )}
+
         {status === "success" && (
           <div className="space-y-4">
             <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/[0.04] p-4">
@@ -328,7 +418,7 @@ export default function RecipientClient({ id }: RecipientClientProps) {
           </div>
         )}
 
-        {status === "error" && (
+        {status === "error" && plaintext && (
           <div className="rounded-2xl border border-red-400/20 bg-red-400/[0.04] p-5">
             <p className="text-sm leading-6 text-red-200">{message}</p>
 

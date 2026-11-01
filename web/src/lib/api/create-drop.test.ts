@@ -1,4 +1,3 @@
-
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { encryptText } from "../crypto/text";
@@ -127,6 +126,7 @@ describe("createDrop", () => {
     expect(mockEncryptText).toHaveBeenCalledWith(
       "Hello Ghostdrop",
       "drop_test_123",
+      undefined,
     );
 
     expect(mockUploadEnvelope).toHaveBeenCalledWith(

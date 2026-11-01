@@ -1,4 +1,3 @@
-
 import { encryptText } from "../crypto/text";
 import { parseFrame } from "../crypto/frame";
 import {
@@ -18,6 +17,7 @@ export interface CreateDropOptions {
   text: string;
   ttlSeconds: DropTtlSeconds;
   maxViews: number;
+  password?: string;
 }
 
 function splitTextFrames(stream: Uint8Array): Uint8Array[] {
@@ -75,6 +75,12 @@ function validateOptions(options: CreateDropOptions): void {
     throw new Error("Enter text before creating a drop.");
   }
 
+  if (typeof options.password === "string" && options.password.length > 0) {
+    if (options.password.length > 256) {
+      throw new Error("Password must be 256 characters or fewer.");
+    }
+  }
+
   if (![3600, 86400, 604800].includes(options.ttlSeconds)) {
     throw new Error("Select a supported expiry duration.");
   }
@@ -103,7 +109,11 @@ export async function createDrop(
   let finalized = false;
 
   try {
-    const encrypted = await encryptText(options.text, reservation.id);
+    const encrypted = await encryptText(
+      options.text,
+      reservation.id,
+      options.password,
+    );
     const frames = splitTextFrames(encrypted.payload.stream);
 
     await uploadEnvelope(

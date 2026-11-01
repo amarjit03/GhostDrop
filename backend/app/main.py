@@ -1,7 +1,7 @@
-
 # app/main.py
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from urllib.parse import unquote
 
@@ -60,16 +60,30 @@ async def normalize_drop_not_found(
     return response
 
 
+env_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
+
 origins = [
     "http://localhost:3000",
+    "http://localhost:3001",
     "http://localhost:5173",
+    "http://localhost:5174",
     "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
     "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
 ]
+
+if env_origins:
+    origins.extend(
+        origin.strip() for origin in env_origins.split(",") if origin.strip()
+    )
+
+allow_origin_regex = r"https?://(localhost|127\.0\.0\.1):(3000|3001|5173|5174)"
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=allow_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
